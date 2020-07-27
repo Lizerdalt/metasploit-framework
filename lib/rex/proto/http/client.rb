@@ -42,7 +42,7 @@ class Client
 
     # XXX: This info should all be controlled by ClientRequest
     self.config_types = {
-      'uri_encode_mode'        => ['hex-normal', 'hex-all', 'hex-random', 'u-normal', 'u-random', 'u-all'],
+      'uri_encode_mode'        => ['hex-normal', 'hex-all', 'hex-random', 'hex-noslashes', 'u-normal', 'u-random', 'u-all'],
       'uri_encode_count'       => 'integer',
       'uri_full_url'           => 'bool',
       'pad_method_uri_count'   => 'integer',
@@ -66,7 +66,8 @@ class Client
       'uri_fake_end'           => 'bool',
       'uri_fake_params_start'  => 'bool',
       'header_folding'         => 'bool',
-      'chunked_size'           => 'integer'
+      'chunked_size'           => 'integer',
+      'partial'                => 'bool'
     }
 
 
@@ -92,7 +93,7 @@ class Client
       # config.
 
       if(typ == 'bool')
-        val = (val =~ /^(t|y|1)$/i ? true : false || val === true)
+        val = (val == true || val.to_s =~ /^(t|y|1)/i)
       end
 
       if(typ == 'integer')
@@ -116,7 +117,7 @@ class Client
   # @option opts 'method'        [String] HTTP method to use in the request, not limited to standard methods defined by rfc2616, default: GET
   # @option opts 'proto'         [String] protocol, default: HTTP
   # @option opts 'query'         [String] raw query string
-  # @option opts 'raw_headers'   [Hash]   HTTP headers
+  # @option opts 'raw_headers'   [String] Raw HTTP headers
   # @option opts 'uri'           [String] the URI to request
   # @option opts 'version'       [String] version of the protocol, default: 1.1
   # @option opts 'vhost'         [String] Host header value
@@ -159,7 +160,7 @@ class Client
   #
   # Connects to the remote server if possible.
   #
-  # @param t [Fixnum] Timeout
+  # @param t [Integer] Timeout
   # @see Rex::Socket::Tcp.create
   # @return [Rex::Socket::Tcp]
   def connect(t = -1)
@@ -191,9 +192,9 @@ class Client
   # Closes the connection to the remote server.
   #
   def close
-    if (self.conn)
+    if self.conn && !self.conn.closed?
       self.conn.shutdown
-      self.conn.close unless self.conn.closed?
+      self.conn.close
     end
 
     self.conn = nil
@@ -206,8 +207,8 @@ class Client
   # authentication and return the final response
   #
   # @return (see #_send_recv)
-  def send_recv(req, t = -1, persist=false)
-    res = _send_recv(req,t,persist)
+  def send_recv(req, t = -1, persist = false)
+    res = _send_recv(req, t, persist)
     if res and res.code == 401 and res.headers['WWW-Authenticate']
       res = send_auth(res, req.opts, t, persist)
     end
@@ -224,11 +225,12 @@ class Client
   # authentication handling.
   #
   # @return (see #read_response)
-  def _send_recv(req, t = -1, persist=false)
+  def _send_recv(req, t = -1, persist = false)
     @pipeline = persist
     send_request(req, t)
     res = read_response(t)
     res.request = req.to_s if res
+    res.peerinfo = peerinfo if res
     res
   end
 
@@ -250,7 +252,7 @@ class Client
   #
   # @param res [Response] the HTTP Response object
   # @param opts [Hash] the options used to generate the original HTTP request
-  # @param t [Fixnum] the timeout for the request in seconds
+  # @param t [Integer] the timeout for the request in seconds
   # @param persist [Boolean] whether or not to persist the TCP connection (pipelining)
   #
   # @return [Response] the last valid HTTP response object we received
@@ -310,12 +312,18 @@ class Client
     auth_str = "Basic " + Rex::Text.encode_base64(auth_str)
   end
 
+
+  def make_cnonce
+    Digest::MD5.hexdigest "%x" % (Time.now.to_i + rand(65535))
+  end
+
   # Send a series of requests to complete Digest Authentication
   #
   # @param opts [Hash] the options used to build an HTTP request
   # @return [Response] the last valid HTTP response we received
   def digest_auth(opts={})
-    @nonce_count = 0
+    cnonce = make_cnonce
+    nonce_count = 0
 
     to = opts['timeout'] || 20
 
@@ -330,7 +338,7 @@ class Client
     end
 
     begin
-    @nonce_count += 1
+    nonce_count += 1
 
     resp = opts['response']
 
@@ -387,7 +395,7 @@ class Client
       [
         algorithm.hexdigest("#{digest_user}:#{parameters['realm']}:#{digest_password}"),
         parameters['nonce'],
-        @cnonce
+        cnonce
       ].join ':'
     else
       "#{digest_user}:#{parameters['realm']}:#{digest_password}"
@@ -397,7 +405,7 @@ class Client
     ha2 = algorithm.hexdigest("#{method}:#{path}")
 
     request_digest = [ha1, parameters['nonce']]
-    request_digest.push(('%08x' % @nonce_count), @cnonce, qop) if qop
+    request_digest.push(('%08x' % nonce_count), cnonce, qop) if qop
     request_digest << ha2
     request_digest = request_digest.join ':'
 
@@ -407,8 +415,8 @@ class Client
       "realm=\"#{parameters['realm']}\"",
       "nonce=\"#{parameters['nonce']}\"",
       "uri=\"#{path}\"",
-      "cnonce=\"#{@cnonce}\"",
-      "nc=#{'%08x' % @nonce_count}",
+      "cnonce=\"#{cnonce}\"",
+      "nc=#{'%08x' % nonce_count}",
       "algorithm=#{algstr}",
       "response=\"#{algorithm.hexdigest(request_digest)[0, 32]}\"",
       # The spec says the qop value shouldn't be enclosed in quotes, but
@@ -516,18 +524,17 @@ class Client
   #
   # Read a response from the server
   #
+  # Wait at most t seconds for the full response to be read in.
+  # If t is specified as a negative value, it indicates an indefinite wait cycle.
+  # If t is specified as nil or 0, it indicates no response parsing is required.
+  #
   # @return [Response]
   def read_response(t = -1, opts = {})
+    # Return a nil response if timeout is nil or 0
+    return if t.nil? || t == 0
 
     resp = Response.new
     resp.max_data = config['read_max_data']
-
-    # Wait at most t seconds for the full response to be read in.  We only
-    # do this if t was specified as a negative value indicating an infinite
-    # wait cycle.  If t were specified as nil it would indicate that no
-    # response parsing is required.
-
-    return resp if not t
 
     Timeout.timeout((t < 0) ? nil : t) do
 
@@ -599,6 +606,9 @@ class Client
     end
 
     resp
+  rescue Timeout::Error
+    # Allow partial response due to timeout
+    resp if config['partial']
   end
 
   #
@@ -620,6 +630,22 @@ class Client
   #
   def pipelining?
     pipeline
+  end
+
+  #
+  # Target host addr and port for this connection
+  #
+  def peerinfo
+    if self.conn
+      pi = self.conn.peerinfo || nil
+      if pi
+        return {
+          'addr' => pi.split(':')[0],
+          'port' => pi.split(':')[1].to_i
+        }
+      end
+    end
+    nil
   end
 
   #

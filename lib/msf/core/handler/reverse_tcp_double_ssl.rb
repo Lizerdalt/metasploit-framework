@@ -63,7 +63,7 @@ module ReverseTcpDoubleSSL
   # if it fails to start the listener.
   #
   def setup_handler
-    if datastore['Proxies'] and not datastore['ReverseAllowProxy']
+    if !datastore['Proxies'].blank? && !datastore['ReverseAllowProxy']
       raise RuntimeError, 'TCP connect-back payloads cannot be used with Proxies. Can be overriden by setting ReverseAllowProxy to true'
     end
 
@@ -146,8 +146,8 @@ module ReverseTcpDoubleSSL
             sock_inp, sock_out = detect_input_output(client_a_copy, client_b_copy)
             chan = TcpReverseDoubleSSLSessionChannel.new(framework, sock_inp, sock_out)
             handle_connection(chan.lsock, { datastore: datastore })
-          rescue
-            elog("Exception raised from handle_connection: #{$!}\n\n#{$@.join("\n")}")
+          rescue => e
+            elog('Exception raised from handle_connection', error: e)
           end
         }
       end while true
