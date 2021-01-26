@@ -3,7 +3,6 @@
 # Current source: https://github.com/rapid7/metasploit-framework
 ##
 
-require 'msf/core/auxiliary/cisco'
 
 class MetasploitModule < Msf::Post
   include Msf::Auxiliary::Cisco
@@ -118,7 +117,7 @@ class MetasploitModule < Msf::Post
     else
       if pass_file
         if !::File.exist?(pass_file)
-          print_error("Wordlist File #{pass_file} does not exists!")
+          print_error("Wordlist File #{pass_file} does not exist!")
           return
         end
         creds = ::File.open(pass_file, 'rb')

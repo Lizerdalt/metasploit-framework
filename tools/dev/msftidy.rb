@@ -538,6 +538,7 @@ class Msftidy
     no_stdio   = true
     in_comment = false
     in_literal = false
+    in_heredoc = false
     src_ended  = false
     idx        = 0
 
@@ -556,6 +557,15 @@ class Msftidy
       in_literal = false if ln =~ /^EOS$/
       next if in_literal
       in_literal = true if ln =~ /\<\<-EOS$/
+
+      # heredoc string awareness (ignore indentation in these)
+      if in_heredoc
+        in_heredoc = false if ln =~ /\s#{in_heredoc}$/
+        next
+      end
+      if ln =~ /\<\<\~([A-Z]+)$/
+        in_heredoc = $1
+      end
 
       # ignore stuff after an __END__ line
       src_ended = true if ln =~ /^__END__$/
@@ -720,6 +730,17 @@ class Msftidy
     end
   end
 
+  # Check for modules specifying a description
+  #
+  def check_description
+    # Payloads do not require a description
+    return if @module_type == 'payloads'
+
+    unless @source =~ /["']Description["'][[:space:]]*=>/
+      error('Missing "Description" info, please add')
+    end
+  end
+
   #
   # Run all the msftidy checks.
   #
@@ -755,6 +776,7 @@ class Msftidy
     check_use_datastore_debug
     check_arch
     check_author
+    check_description
   end
 
   private
